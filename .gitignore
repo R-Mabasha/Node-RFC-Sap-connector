@@ -1,0 +1,8 @@
+mcp-server/node_modules/
+mcp-server/dist/
+mcp-server/.env
+mcp-server/.env.local
+*.log
+*.trc
+_noderfc.log
+.vscode/
