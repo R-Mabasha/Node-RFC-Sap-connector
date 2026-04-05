@@ -6,3 +6,4 @@ mcp-server/.env.local
 *.trc
 _noderfc.log
 .vscode/
+.local-remote.git/
