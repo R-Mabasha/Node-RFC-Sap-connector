@@ -26,12 +26,12 @@ export interface SapConfig {
   poolHigh: number;
   /** Per-call RFC timeout in milliseconds. */
   timeoutMs: number;
-  /** Allowlisted SAP tables for generic table reads. */
-  allowedTables: string[];
-  /** Allowlisted RFC function modules (standard + ZHC_* wrappers). */
-  allowedFunctions: string[];
   /** Ordered list of table-reader FMs to try (S/4 compatible). */
   tableReadFunctions: string[];
+  /** Allowlisted SAP tables - EMPTY ARRAY = unrestricted access */
+  allowedTables: string[];
+  /** Allowlisted RFC function modules - EMPTY ARRAY = unrestricted access */
+  allowedFunctions: string[];
   /** Circuit breaker: consecutive failures before opening the breaker. */
   circuitBreakerThreshold: number;
   /** Circuit breaker: milliseconds to wait before retrying after breaker opens. */
@@ -86,6 +86,13 @@ export interface KpiRequestInput {
   from?: string;
   to?: string;
   dimensions?: Record<string, string>;
+  /**
+   * Target SAP landscape for flavor-aware KPI logic.
+   * - shared: use shared/default-safe logic that auto-detects when possible
+   * - ecc: prefer ECC-safe sources and fallbacks
+   * - s4hana: prefer S/4HANA-native sources and fallbacks
+   */
+  sapFlavor?: SapFlavor;
 }
 
 export interface ResolvedWindow {
@@ -95,6 +102,8 @@ export interface ResolvedWindow {
   sapFrom: string;
   /** SAP-format date string YYYYMMDD for the end of the window. */
   sapTo: string;
+  /** Number of days in this window (minimum 1). Used to scale scan caps for larger date ranges. */
+  windowDays: number;
 }
 
 /**
@@ -105,6 +114,8 @@ export interface ResolvedWindow {
  * - daily:    once per day (password age, inactive users, growth rates)
  */
 export type KpiTier = "realtime" | "frequent" | "batch" | "daily";
+
+export type SapFlavor = "shared" | "ecc" | "s4hana";
 
 export type KpiStatus =
   | "ok"

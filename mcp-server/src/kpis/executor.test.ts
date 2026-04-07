@@ -21,17 +21,17 @@ class FakeSapClient implements SapClient {
       EV_SCHEMA_VERSION: "1.0",
       ET_KPIS: [
         {
-          KPI_ID: "authorization_failures",
-          TITLE: "Authorization Failures",
-          CATEGORY: "Security & Authorization",
+          KPI_ID: "service_calls",
+          TITLE: "Service Calls",
+          CATEGORY: "Business Process KPIs",
           STATUS: "OK",
           UNIT: "count",
           VALUE_NUM: 3,
         },
         {
-          KPI_ID: "users_with_sod_conflicts",
-          TITLE: "Users with SoD Conflicts",
-          CATEGORY: "Security & Authorization",
+          KPI_ID: "parts_consumed",
+          TITLE: "Parts Consumed",
+          CATEGORY: "Business Process KPIs",
           STATUS: "OK",
           UNIT: "count",
           VALUE_NUM: 1,
@@ -62,19 +62,19 @@ test("runMany reuses one wrapper call for multiple KPIs in the same family", asy
   const executor = new KpiExecutor(sapClient);
 
   const results = await executor.runMany(
-    ["authorization_failures", "users_with_sod_conflicts"],
+    ["service_calls", "parts_consumed"],
     {
       from: "2026-01-01T00:00:00.000Z",
       to: "2026-01-02T00:00:00.000Z",
     },
   );
 
-  assert.deepEqual(sapClient.calls, ["ZHC_GET_SECURITY_KPIS"]);
+  assert.deepEqual(sapClient.calls, ["ZHC_GET_SERVICE_KPIS"]);
   assert.deepEqual(
     results.map((result) => [result.kpiId, result.value]),
     [
-      ["authorization_failures", 3],
-      ["users_with_sod_conflicts", 1],
+      ["service_calls", 3],
+      ["parts_consumed", 1],
     ],
   );
 });

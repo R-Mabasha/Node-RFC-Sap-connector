@@ -109,7 +109,7 @@ test("loadConfig can find env files from the package root when cwd differs", () 
   });
 });
 
-test("loadConfig keeps the built-in allowlist even when env files provide older custom lists", () => {
+test("loadConfig ignores legacy allowlist env vars in unrestricted mode", () => {
   withTempDir((dir) => {
     writeFileSync(
       join(dir, ".env"),
@@ -123,10 +123,13 @@ test("loadConfig keeps the built-in allowlist even when env files provide older 
 
     const config = loadConfig({}, { cwd: dir, envSearchRoots: [dir] });
 
-    assert.equal(config.sap.allowedTables.includes("USR41"), true);
-    assert.equal(config.sap.allowedTables.includes("E070"), true);
-    assert.equal(config.sap.allowedTables.includes("SWWWIHEAD"), true);
-    assert.equal(config.sap.allowedFunctions.includes("RFC_SYSTEM_INFO"), true);
-    assert.equal(config.sap.allowedFunctions.includes("TH_WPINFO"), true);
+    assert.deepEqual(config.sap.allowedTables, []);
+    assert.deepEqual(config.sap.allowedFunctions, []);
+    assert.equal(
+      config.sap.configWarnings.includes(
+        "SAP_ALLOWED_TABLES and SAP_ALLOWED_FUNCTIONS are ignored because this MCP server runs in unrestricted SAP access mode.",
+      ),
+      true,
+    );
   });
 });

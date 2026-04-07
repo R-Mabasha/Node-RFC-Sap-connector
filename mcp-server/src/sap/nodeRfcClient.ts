@@ -16,7 +16,12 @@
 // ---------------------------------------------------------------------------
 
 import type { SapClient, SapConfig, SapDiagnostics, TableReadRequest, TableReadResult } from "../types.js";
-import { describeError } from "../utils/errors.js";
+import {
+  describeError,
+  getSapErrorKey,
+  isBusyResourceError,
+  shouldTripCircuitBreaker,
+} from "../utils/errors.js";
 
 // ── node-rfc type stubs (avoids hard compile-time dependency) ──────────────
 
@@ -55,6 +60,9 @@ const MAX_ROWCOUNT = 1000;
 
 /** Default field delimiter for table-read parsing. */
 const DEFAULT_DELIMITER = "|";
+
+/** Retry delays for transient "device or resource busy" SAP errors. */
+const BUSY_RETRY_DELAYS_MS = [250, 750];
 
 // ── Circuit breaker ────────────────────────────────────────────────────────
 
@@ -174,13 +182,10 @@ function joinErrorMessages(errors: Array<{ functionName: string; error: unknown 
     .join(" | ");
 }
 
-function getSapErrorKey(error: unknown): string | undefined {
-  if (!error || typeof error !== "object") {
-    return undefined;
-  }
-
-  const key = (error as Record<string, unknown>).key;
-  return typeof key === "string" ? key.toUpperCase() : undefined;
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function shouldCompactWhereClauses(
@@ -230,13 +235,12 @@ export function normalizeTableReadWhere(
 // ── Main client class ──────────────────────────────────────────────────────
 
 export class NodeRfcSapClient implements SapClient {
-  private readonly allowedTables: Set<string>;
-  private readonly allowedFunctions: Set<string>;
   private readonly tableReadFunctions: string[];
   private readonly unavailableTableReadFunctions = new Set<string>();
   private poolPromise?: Promise<NodeRfcPool>;
   private activeTableReadFunction?: string;
   private tableReadResolutionPromise?: Promise<void>;
+  private tableReadTail: Promise<void> = Promise.resolve();
 
   /** Circuit breaker prevents hammering a down SAP system. */
   private readonly breaker: CircuitBreaker;
@@ -246,10 +250,6 @@ export class NodeRfcSapClient implements SapClient {
   private totalFailures = 0;
 
   constructor(private readonly config: SapConfig) {
-    this.allowedTables = new Set(config.allowedTables.map(normalizeIdentifier));
-    this.allowedFunctions = new Set(
-      config.allowedFunctions.map(normalizeIdentifier),
-    );
     this.tableReadFunctions = config.tableReadFunctions.map(normalizeIdentifier);
     this.breaker = createCircuitBreaker(
       config.circuitBreakerThreshold,
@@ -283,12 +283,6 @@ export class NodeRfcSapClient implements SapClient {
 
     const normalizedName = normalizeIdentifier(functionName);
 
-    if (!this.allowedFunctions.has(normalizedName)) {
-      throw new Error(
-        `Function module '${normalizedName}' is not allowlisted for this MCP server.`,
-      );
-    }
-
     return this.withCircuitBreaker(() =>
       this.withClient((client) => client.call(normalizedName, parameters)),
     );
@@ -308,11 +302,6 @@ export class NodeRfcSapClient implements SapClient {
     this.requireConnectionParameters();
 
     const table = normalizeIdentifier(request.table);
-
-    if (!this.allowedTables.has(table)) {
-      throw new Error(`Table '${table}' is not allowlisted for this MCP server.`);
-    }
-
     const fields = request.fields.map(normalizeIdentifier);
     const rowCount = Math.min(Math.max(request.rowCount ?? 200, 1), MAX_ROWCOUNT);
     const rowSkips = Math.max(request.rowSkips ?? 0, 0);
@@ -404,9 +393,36 @@ export class NodeRfcSapClient implements SapClient {
       return result;
     } catch (error) {
       this.totalFailures += 1;
-      recordFailure(this.breaker);
+      if (shouldTripCircuitBreaker(error)) {
+        recordFailure(this.breaker);
+      } else {
+        recordSuccess(this.breaker);
+      }
       throw error;
     }
+  }
+
+  private async withTransientRetries<T>(fn: () => Promise<T>): Promise<T> {
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= BUSY_RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        return await fn();
+      } catch (error) {
+        lastError = error;
+
+        if (
+          !isBusyResourceError(error) ||
+          attempt === BUSY_RETRY_DELAYS_MS.length
+        ) {
+          throw error;
+        }
+
+        await sleep(BUSY_RETRY_DELAYS_MS[attempt] ?? 0);
+      }
+    }
+
+    throw lastError;
   }
 
   // ── Pool management ────────────────────────────────────────────────────
@@ -527,27 +543,14 @@ export class NodeRfcSapClient implements SapClient {
         delimiter: string;
       }
     | undefined {
-    if (this.allowedTables.has("USR41")) {
-      return {
-        table: "USR41",
-        fields: ["BNAME"],
-        rowCount: 1,
-        rowSkips: 0,
-        delimiter: DEFAULT_DELIMITER,
-      };
-    }
-
-    if (this.allowedTables.has("TBTCO")) {
-      return {
-        table: "TBTCO",
-        fields: ["JOBNAME"],
-        rowCount: 1,
-        rowSkips: 0,
-        delimiter: DEFAULT_DELIMITER,
-      };
-    }
-
-    return undefined;
+    // Use T000 (Client table) as universal probe - exists in all SAP systems
+    return {
+      table: "T000",
+      fields: ["MANDT"],
+      rowCount: 1,
+      rowSkips: 0,
+      delimiter: DEFAULT_DELIMITER,
+    };
   }
 
   private async callTableReader(
@@ -572,16 +575,20 @@ export class NodeRfcSapClient implements SapClient {
       request.where,
     );
 
-    return this.withCircuitBreaker(() =>
-      this.withClient((client) =>
-        client.call(functionName, {
-          QUERY_TABLE: request.table,
-          DELIMITER: request.delimiter,
-          ROWCOUNT: request.rowCount,
-          ROWSKIPS: request.rowSkips,
-          FIELDS: request.fields.map((field) => ({ FIELDNAME: field })),
-          OPTIONS: normalizedWhere.map((line) => ({ TEXT: line })),
-        }),
+    return this.withSerializedTableRead(() =>
+      this.withCircuitBreaker(() =>
+        this.withTransientRetries(() =>
+          this.withClient((client) =>
+            client.call(functionName, {
+              QUERY_TABLE: request.table,
+              DELIMITER: request.delimiter,
+              ROWCOUNT: request.rowCount,
+              ROWSKIPS: request.rowSkips,
+              FIELDS: request.fields.map((field) => ({ FIELDNAME: field })),
+              OPTIONS: normalizedWhere.map((line) => ({ TEXT: line })),
+            }),
+          ),
+        ),
       ),
     );
   }
@@ -612,6 +619,23 @@ export class NodeRfcSapClient implements SapClient {
       return await fn(client);
     } finally {
       await client.release();
+    }
+  }
+
+  private async withSerializedTableRead<T>(fn: () => Promise<T>): Promise<T> {
+    const previous = this.tableReadTail.catch(() => undefined);
+    let release: (() => void) | undefined;
+
+    this.tableReadTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    await previous;
+
+    try {
+      return await fn();
+    } finally {
+      release?.();
     }
   }
 }

@@ -40,3 +40,49 @@ export function describeError(error: unknown): string {
 
   return String(error);
 }
+
+const SAP_CAPABILITY_ERROR_KEYS = new Set([
+  "FU_NOT_FOUND",
+  "FIELD_NOT_VALID",
+  "TABLE_NOT_AVAILABLE",
+  "SAPSQL_PARSE_ERROR",
+  "NOT_FOUND",
+]);
+
+const SAP_CAPABILITY_ERROR_PATTERNS = [
+  /\bFU_NOT_FOUND\b/i,
+  /\bFIELD_NOT_VALID\b/i,
+  /\bTABLE_NOT_AVAILABLE\b/i,
+  /\bSAPSQL_PARSE_ERROR\b/i,
+  /\bnot found\b/i,
+  /\bdoes not exist\b/i,
+  /\bunknown field\b/i,
+  /\bunknown column\b/i,
+];
+
+export function getSapErrorKey(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+
+  const key = (error as Record<string, unknown>).key;
+  return typeof key === "string" ? key.toUpperCase() : undefined;
+}
+
+export function isBusyResourceError(error: unknown): boolean {
+  return describeError(error).toLowerCase().includes("device or resource busy");
+}
+
+export function isSapCapabilityError(error: unknown): boolean {
+  const key = getSapErrorKey(error);
+  if (key && SAP_CAPABILITY_ERROR_KEYS.has(key)) {
+    return true;
+  }
+
+  const message = describeError(error);
+  return SAP_CAPABILITY_ERROR_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+export function shouldTripCircuitBreaker(error: unknown): boolean {
+  return !isSapCapabilityError(error);
+}

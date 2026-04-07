@@ -10,22 +10,21 @@ import {
 
 test("buildWrapperCatalog groups wrapper-backed KPIs by function", () => {
   const catalog = buildWrapperCatalog(KPI_DEFINITIONS, [
-    "ZHC_GET_SECURITY_KPIS",
-    "ZHC_GET_OTC_KPIS",
+    "ZHC_GET_SERVICE_KPIS",
+    "ZHC_GET_TAX_KPIS",
   ]);
-  const security = catalog.find(
-    (entry) => entry.functionName === "ZHC_GET_SECURITY_KPIS",
+  const service = catalog.find(
+    (entry) => entry.functionName === "ZHC_GET_SERVICE_KPIS",
   );
 
-  assert.ok(security);
-  assert.equal(security.allowlisted, true);
+  assert.ok(service);
+  assert.equal(service.allowlisted, true);
   assert.deepEqual(
-    security.kpis.map((kpi) => kpi.wrapperKpiId),
+    service.kpis.map((kpi) => kpi.wrapperKpiId),
     [
-      "authorization_failures",
-      "emergency_access_sessions",
-      "expired_password_pct",
-      "users_with_sod_conflicts",
+      "parts_consumed",
+      "service_calls",
+      "techs_dispatched",
     ],
   );
 });

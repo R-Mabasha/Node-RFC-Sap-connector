@@ -21,49 +21,9 @@ import * as z from "zod/v4";
 import type { AppConfig } from "./types.js";
 
 const DEFAULT_TABLE_READ_FUNCTIONS = "/BUI/RFC_READ_TABLE,BBP_RFC_READ_TABLE";
-const DEFAULT_ALLOWED_TABLES = [
-  "TBTCO", "TBTCS", "SNAP",
-  "EDIDC", "EDIDS",
-  "USR02", "USR41", "USREFUS",
-  "RSECACTPROT",
-  "VBAK", "VBRK", "VBUK", "VBEP", "LIKP",
-  "EKKO", "EKBE", "RBKP", "MARA", "MKPF", "MSEG",
-  "BKPF", "BSEG", "FAGLFLEXT", "REGUH", "REGUP",
-  "AUFK", "AFKO", "AFRU", "QMEL", "IFLOT",
-  "ARFCSSTATE", "QRFCSSTATE", "IUUC_REPL_CONTENT", "TRFCQOUT", "VBHDR",
-  "MDLG",
-  "CVI_CUST_LINK", "CVI_VEND_LINK",
-  "BUT000", "KNA1", "LFA1",
-  "E070", "E071",
-  "SWWWIHEAD",
-  "TSP01",
-  "DBSTATTABC",
-  "NRIV",
-  "GRACSOBJECT", "GRACFFLOG",
-].join(",");
-const DEFAULT_ALLOWED_FUNCTIONS = [
-  "RFC_SYSTEM_INFO",
-  "TH_SERVER_LIST",
-  "TH_WPINFO",
-  "RSLG_GET_MESSAGES",
-  "SWNC_COLLECTOR_GET_AGGREGATES",
-  "ENQUEUE_STATISTICS",
-  "ICM_GET_MONITOR_INFO",
-  "GW_GET_STATISTIC",
-  "SLIC_GET_INSTALLATIONS",
-  "BAPI_SYSTEM_MON_GETSYSINFO",
-  "ZHC_GET_SECURITY_KPIS",
-  "ZHC_GET_OTC_KPIS",
-  "ZHC_GET_P2P_KPIS",
-  "ZHC_GET_FINANCE_KPIS",
-  "ZHC_GET_DATA_QUALITY_KPIS",
-  "ZHC_GET_JOB_KPIS",
-  "ZHC_GET_MANUFACTURING_KPIS",
-  "ZHC_GET_SERVICE_KPIS",
-  "ZHC_GET_TAX_KPIS",
-  "ZHC_GET_EAM_KPIS",
-  "ZHC_GET_INFRASTRUCTURE_KPIS",
-].join(",");
+
+// ALLOWLIST DISABLED: This MCP server has unrestricted access to all SAP tables and function modules.
+// Use only in trusted, private SAP environments.
 
 // ── Zod schema for environment variables ───────────────────────────────────
 
@@ -95,31 +55,8 @@ const envSchema = z.object({
   // -- Table reader function chain (S/4 compatible alternatives) --
   SAP_TABLE_READ_FUNCTIONS: z.string().default(DEFAULT_TABLE_READ_FUNCTIONS),
 
-  // -- Allowlisted SAP tables for generic reads --
-  // Organized by domain for clarity:
-  //   Jobs:        TBTCO, TBTCS
-  //   Dumps:       SNAP
-  //   IDocs:       EDIDC, EDIDS
-  //   Users:       USR02, USR41, USREFUS
-  //   Security:    RSECACTPROT
-  //   SD/OTC:      VBAK, VBRK, VBUK, VBEP, LIKP
-  //   MM/P2P:      EKKO, EKBE, RBKP, MARA, MKPF, MSEG
-  //   Finance:     BKPF, BSEG, FAGLFLEXT, REGUH, REGUP
-  //   PM/EAM:      AUFK, AFKO, AFRU, QMEL, IFLOT
-  //   Integration: ARFCSSTATE, QRFCSSTATE, IUUC_REPL_CONTENT, TRFCQOUT, VBHDR
-  //   MRP:         MDLG
-  //   CVI:         CVI_CUST_LINK, CVI_VEND_LINK
-  //   Master Data: BUT000, KNA1, LFA1
-  //   Transport:   E070, E071
-  //   Workflow:    SWWWIHEAD
-  //   Spool:       TSP01
-  //   DB Stats:    DBSTATTABC
-  //   Number Range: NRIV
-  //   GRC:         GRACSOBJECT, GRACFFLOG
+  // -- Legacy allowlist env vars kept only for backward-compatible warnings --
   SAP_ALLOWED_TABLES: z.string().optional(),
-
-  // -- Allowlisted RFC function modules --
-  // Standard SAP FMs for system monitoring + custom ZHC_* wrappers
   SAP_ALLOWED_FUNCTIONS: z.string().optional(),
 });
 
@@ -193,11 +130,7 @@ function dedupeStrings(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-function mergeCsvLists(...values: Array<string | undefined>): string[] {
-  return dedupeStrings(
-    values.flatMap((value) => (value ? splitCsv(value) : [])),
-  );
-}
+
 
 function resolveEnvSearchRoots(
   cwd: string,
@@ -400,6 +333,11 @@ export function loadConfig(
     ...envInput,
   });
   const validationWarnings = validateDirectConnectionParameters(env);
+  if (env.SAP_ALLOWED_TABLES || env.SAP_ALLOWED_FUNCTIONS) {
+    validationWarnings.push(
+      "SAP_ALLOWED_TABLES and SAP_ALLOWED_FUNCTIONS are ignored because this MCP server runs in unrestricted SAP access mode.",
+    );
+  }
   const resolvedConnection = resolveConnectionParameters(env);
   const configWarnings = [...loadedEnv.warnings, ...validationWarnings];
 
@@ -421,11 +359,8 @@ export function loadConfig(
       poolHigh: env.SAP_POOL_HIGH,
       timeoutMs: env.SAP_RFC_TIMEOUT_MS,
       tableReadFunctions: splitCsv(env.SAP_TABLE_READ_FUNCTIONS),
-      allowedTables: mergeCsvLists(DEFAULT_ALLOWED_TABLES, env.SAP_ALLOWED_TABLES),
-      allowedFunctions: mergeCsvLists(
-        DEFAULT_ALLOWED_FUNCTIONS,
-        env.SAP_ALLOWED_FUNCTIONS,
-      ),
+      allowedTables: [], // Unrestricted access
+      allowedFunctions: [], // Unrestricted access
       circuitBreakerThreshold: env.SAP_CB_THRESHOLD,
       circuitBreakerResetMs: env.SAP_CB_RESET_MS,
     },

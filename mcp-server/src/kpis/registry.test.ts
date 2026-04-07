@@ -5,7 +5,11 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import { loadConfig } from "../config.js";
-import { KPI_DEFINITIONS } from "./definitions.js";
+import {
+  KPI_DEFINITIONS,
+  type KpiDefinition,
+  type NonExecutableKpiDefinition,
+} from "./definitions.js";
 
 function withEmptyTempDir<T>(run: (dir: string) => T): T {
   const dir = mkdtempSync(join(tmpdir(), "hypercare-kpi-registry-"));
@@ -22,6 +26,12 @@ function looksLikeSapIdentifier(value: string): boolean {
   return /^[A-Z0-9_/]+$/.test(trimmed) && trimmed !== "NONE";
 }
 
+function hasWrapper(
+  definition: KpiDefinition,
+): definition is NonExecutableKpiDefinition & { wrapper: { functionName: string } } {
+  return "wrapper" in definition && definition.wrapper !== undefined;
+}
+
 test("KPI registry ids stay unique", () => {
   const seen = new Set<string>();
   const duplicates: string[] = [];
@@ -36,54 +46,24 @@ test("KPI registry ids stay unique", () => {
   assert.deepEqual(duplicates, []);
 });
 
-test("implemented and planned KPIs remain compatible with the default allowlists", () => {
+test("default config exposes unrestricted SAP access mode", () => {
   const config = withEmptyTempDir((cwd) => loadConfig({}, { cwd }));
-  const allowedTables = new Set(config.sap.allowedTables);
-  const allowedFunctions = new Set(config.sap.allowedFunctions);
-  const problems: Array<Record<string, string>> = [];
+  assert.deepEqual(config.sap.allowedTables, []);
+  assert.deepEqual(config.sap.allowedFunctions, []);
+});
 
-  for (const definition of KPI_DEFINITIONS) {
-    if (definition.maturity === "excluded") {
-      continue;
-    }
+test("wrapper-backed KPIs remain grouped in the registry", () => {
+  const wrapperBacked = KPI_DEFINITIONS
+    .filter(hasWrapper)
+    .map((definition) => definition.wrapper.functionName)
+    .filter((value) => looksLikeSapIdentifier(value));
 
-    if ("wrapper" in definition && definition.wrapper) {
-      const functionName = definition.wrapper.functionName.toUpperCase();
-      if (!allowedFunctions.has(functionName)) {
-        problems.push({
-          kpiId: definition.id,
-          type: "wrapper_not_allowlisted",
-          dependency: functionName,
-        });
-      }
-      continue;
-    }
-
-    if (definition.maturity !== "implemented" && definition.maturity !== "planned") {
-      continue;
-    }
-
-    for (const objectName of definition.source.objects) {
-      const dependency = objectName.trim().toUpperCase();
-
-      if (!looksLikeSapIdentifier(dependency)) {
-        continue;
-      }
-
-      const isCovered =
-        allowedTables.has(dependency) || allowedFunctions.has(dependency);
-
-      if (!isCovered) {
-        problems.push({
-          kpiId: definition.id,
-          type: "dependency_not_allowlisted",
-          dependency,
-        });
-      }
-    }
-  }
-
-  assert.deepEqual(problems, []);
+  assert.deepEqual([...new Set(wrapperBacked)].sort(), [
+    "ZHC_GET_DATA_QUALITY_KPIS",
+    "ZHC_GET_EAM_KPIS",
+    "ZHC_GET_SERVICE_KPIS",
+    "ZHC_GET_TAX_KPIS",
+  ]);
 });
 
 test("every KPI definition exposes a polling tier", () => {
@@ -92,6 +72,14 @@ test("every KPI definition exposes a polling tier", () => {
     .map((definition) => definition.id);
 
   assert.deepEqual(missingTiers, []);
+});
+
+test("every KPI definition exposes sapFlavor support metadata", () => {
+  const missingFlavorSupport = KPI_DEFINITIONS
+    .filter((definition) => !definition.sapFlavorSupport)
+    .map((definition) => definition.id);
+
+  assert.deepEqual(missingFlavorSupport, []);
 });
 
 test("the remaining direct KPI backlog is empty", () => {

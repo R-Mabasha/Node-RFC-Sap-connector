@@ -48,7 +48,7 @@ export function createSapMcpServer(context: ServerContext): McpServer {
   const getWrapperCatalog = () =>
     buildWrapperCatalog(
       context.kpiExecutor.listDefinitions(),
-      context.config.sap.allowedFunctions,
+      [], // Unrestricted access - all functions allowed
     );
 
   server.registerResource(
@@ -201,8 +201,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
         tableReadFunctions: context.sapClient.getDiagnostics().tableReadFunctions,
         activeTableReadFunction:
           context.sapClient.getDiagnostics().activeTableReadFunction,
-        allowedTables: context.config.sap.allowedTables,
-        allowedFunctions: context.config.sap.allowedFunctions,
+        accessMode: "unrestricted",
+        note: "This MCP server has unrestricted access to all SAP tables and function modules.",
         tableReadProbe,
         error,
       };
@@ -219,7 +219,7 @@ export function createSapMcpServer(context: ServerContext): McpServer {
     {
       title: "SAP Wrapper Catalog",
       description:
-        "Lists the ZHC_* wrapper families expected by this MCP server and whether they are allowlisted.",
+        "Lists the ZHC_* wrapper families expected by this MCP server.",
       inputSchema: {
         functionNames: z.array(z.string()).optional(),
         includeKpis: z.boolean().optional(),
@@ -239,7 +239,6 @@ export function createSapMcpServer(context: ServerContext): McpServer {
         )
         .map((entry) => ({
           functionName: entry.functionName,
-          allowlisted: entry.allowlisted,
           kpiCount: entry.kpis.length,
           categories: entry.categories,
           blockers: entry.blockers,
@@ -295,9 +294,7 @@ export function createSapMcpServer(context: ServerContext): McpServer {
             window,
           }),
           catalogMatched: Boolean(catalogEntry),
-          allowlisted: context.config.sap.allowedFunctions.includes(
-            normalizedFunctionName,
-          ),
+          accessMode: "unrestricted",
           documentedKpiIds: catalogEntry?.kpis.map((kpi) => kpi.wrapperKpiId) ?? [],
         };
 
@@ -310,9 +307,7 @@ export function createSapMcpServer(context: ServerContext): McpServer {
           ok: false,
           functionName: normalizedFunctionName,
           catalogMatched: Boolean(catalogEntry),
-          allowlisted: context.config.sap.allowedFunctions.includes(
-            normalizedFunctionName,
-          ),
+          accessMode: "unrestricted",
           expectedKpiIds: effectiveExpectedKpiIds,
           error: describeError(error),
         };
@@ -342,14 +337,16 @@ export function createSapMcpServer(context: ServerContext): McpServer {
             ]),
           )
           .optional(),
+        sapFlavor: z.enum(["shared", "ecc", "s4hana"]).optional(),
       },
       annotations: {
         readOnlyHint: true,
       },
     },
-    async ({ maturity }) => {
-      const definitions = context.kpiExecutor
-        .listDefinitions()
+    async ({ maturity, sapFlavor }) => {
+      const definitions = (sapFlavor
+        ? context.kpiExecutor.listDefinitionsForFlavor(sapFlavor)
+        : context.kpiExecutor.listDefinitions())
         .filter((definition) =>
           maturity && maturity.length > 0
             ? maturity.includes(definition.maturity)
@@ -363,6 +360,7 @@ export function createSapMcpServer(context: ServerContext): McpServer {
           maturity: definition.maturity,
           summary: definition.summary,
           source: definition.source,
+          sapFlavorSupport: definition.sapFlavorSupport,
           notes: definition.notes ?? [],
           blocker:
             "blocker" in definition ? definition.blocker : undefined,
@@ -382,27 +380,88 @@ export function createSapMcpServer(context: ServerContext): McpServer {
     {
       title: "SAP KPI Read",
       description:
-        "Reads one or more SAP KPIs through the registry-driven execution layer.",
+        "Reads one or more SAP KPIs. Use kpiIds=['all'] to run all implemented KPIs. " +
+        "Supports filtering by categories and tiers. Date range via from/to (ISO 8601). " +
+        "Extra per-KPI params via dimensions map.",
       inputSchema: {
-        kpiIds: z.array(z.string()).min(1),
-        from: z.string().optional(),
-        to: z.string().optional(),
-        dimensions: z.record(z.string(), z.string()).optional(),
+        kpiIds: z.array(z.string()).min(1).describe(
+          "KPI IDs to execute. Use ['all'] or ['*'] to run all implemented KPIs.",
+        ),
+        sapFlavor: z.enum(["shared", "ecc", "s4hana"]).optional().describe(
+          "Target SAP landscape strategy. shared uses default-safe logic, ecc prefers ECC-safe paths, and s4hana prefers S/4HANA-native paths.",
+        ),
+        from: z.string().optional().describe("Start of time window (ISO 8601)."),
+        to: z.string().optional().describe("End of time window (ISO 8601)."),
+        dimensions: z.record(z.string(), z.string()).optional().describe(
+          "Extra per-KPI parameters: delay_minutes, inactive_days, stuck_days, movement_types, etc.",
+        ),
+        categories: z.array(z.string()).optional().describe(
+          "Filter KPIs by category when using 'all' mode.",
+        ),
+        tiers: z.array(z.string()).optional().describe(
+          "Filter KPIs by tier (realtime, frequent, batch, daily) when using 'all' mode.",
+        ),
       },
       annotations: {
         readOnlyHint: true,
       },
     },
-    async ({ kpiIds, from, to, dimensions }) => {
-      const results = await context.kpiExecutor.runMany(kpiIds, {
+    async ({ kpiIds, sapFlavor, from, to, dimensions, categories, tiers }) => {
+      const firstId = kpiIds[0] ?? "";
+      const isAllMode =
+        kpiIds.length === 1 &&
+        (firstId.toLowerCase() === "all" || firstId === "*");
+
+      let resolvedIds: string[];
+
+      if (isAllMode) {
+        // Resolve to all implemented KPI IDs, optionally filtered
+        resolvedIds = (sapFlavor
+          ? context.kpiExecutor.listDefinitionsForFlavor(sapFlavor)
+          : context.kpiExecutor.listDefinitions())
+          .filter((def) => def.maturity === "implemented")
+          .filter((def) =>
+            categories && categories.length > 0
+              ? categories.some((cat) =>
+                  def.category.toLowerCase().includes(cat.toLowerCase()),
+                )
+              : true,
+          )
+          .filter((def) =>
+            tiers && tiers.length > 0
+              ? tiers.includes(def.tier ?? "")
+              : true,
+          )
+          .map((def) => def.id);
+      } else {
+        resolvedIds = kpiIds;
+      }
+
+      if (resolvedIds.length === 0) {
+        return {
+          content: [{ type: "text", text: "No KPIs matched the given filters." }],
+          structuredContent: { results: [], filters: { categories, tiers } },
+        };
+      }
+
+      const results = await context.kpiExecutor.runMany(resolvedIds, {
         from,
         to,
+        sapFlavor,
         dimensions,
       });
 
       return {
         content: [{ type: "text", text: summarizeKpis(results) }],
-        structuredContent: { results },
+        structuredContent: {
+          results,
+          meta: {
+            totalRequested: resolvedIds.length,
+            totalReturned: results.length,
+            mode: isAllMode ? "all" : "explicit",
+            sapFlavor: sapFlavor ?? "shared",
+          },
+        },
       };
     },
   );
@@ -412,7 +471,7 @@ export function createSapMcpServer(context: ServerContext): McpServer {
     {
       title: "SAP Table Read",
       description:
-        "Reads an allowlisted SAP table using the configured S/4-compatible table-reader function chain. Intended for controlled extraction and validation.",
+        "Reads any SAP table using the configured S/4-compatible table-reader function chain. Unrestricted access mode.",
       inputSchema: {
         table: z.string(),
         fields: z.array(z.string()).min(1),
@@ -470,7 +529,7 @@ export function createSapMcpServer(context: ServerContext): McpServer {
     {
       title: "SAP Function Call",
       description:
-        "Calls an allowlisted read-only RFC function module. This is the future entry point for custom ZHC_* wrappers.",
+        "Calls any RFC function module. Unrestricted access mode.",
       inputSchema: {
         functionName: z.string(),
         parameters: z.record(z.string(), z.unknown()).optional(),

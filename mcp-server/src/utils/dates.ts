@@ -55,11 +55,15 @@ export function resolveWindow(
     throw new Error("The 'from' timestamp must be earlier than or equal to 'to'.");
   }
 
+  const windowMs = toDate.getTime() - fromDate.getTime();
+  const windowDays = Math.max(1, Math.ceil(windowMs / (24 * 60 * 60 * 1000)));
+
   return {
     from: fromDate.toISOString(),
     to: toDate.toISOString(),
     sapFrom: toSapDate(fromDate),
     sapTo: toSapDate(toDate),
+    windowDays,
   };
 }
 

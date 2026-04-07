@@ -6,7 +6,7 @@ It is built around four principles:
 
 - a shared `node-rfc` connection pool
 - a small MCP tool surface
-- allowlisted table and function access
+- trusted-environment SAP access with defensive runtime safeguards
 - S/4-compatible table reads through a configurable FM chain
 - KPI execution through a registry instead of one tool per KPI
 
@@ -76,13 +76,14 @@ The server starts in stateless Streamable HTTP mode at `http://127.0.0.1:3001/mc
 
 ## Notes
 
-- `sap_table_read` is allowlist-driven and uses the configured table-reader chain, defaulting to `/BUI/RFC_READ_TABLE` then `BBP_RFC_READ_TABLE`.
+- `sap_table_read` uses the configured table-reader chain, defaulting to `/BUI/RFC_READ_TABLE` then `BBP_RFC_READ_TABLE`.
 - For `BBP_RFC_READ_TABLE` and `/BUI/RFC_READ_TABLE`, the server compacts simple multi-clause filters into one SQL string because this SAP system rejects the same predicates when they are sent as separate `OPTIONS` rows.
-- The built-in Hypercare table/function allowlists are always present; `SAP_ALLOWED_TABLES` and `SAP_ALLOWED_FUNCTIONS` add to that baseline instead of replacing it.
-- `sap_function_call` is allowlist-driven and is the future entry point for custom `ZHC_*` RFC wrappers.
+- This server currently runs in unrestricted SAP access mode for trusted private environments. Legacy `SAP_ALLOWED_TABLES` and `SAP_ALLOWED_FUNCTIONS` variables are ignored with a warning.
+- `sap_function_call` is unrestricted and is the future entry point for custom `ZHC_*` RFC wrappers.
 - Complex business KPIs should move to custom ABAP wrappers instead of repeated generic table scans.
-- `sap_kpi_read` now auto-attempts wrapper-backed KPIs when the matching `ZHC_*` FM is allowlisted and available in SAP.
+- `sap_kpi_read` resolves only implemented KPIs in `all` mode. Remaining wrapper-backed KPIs stay visible through the catalog and probe tools.
 - `sap_kpi_read` runs KPI batches sequentially on purpose. This avoids `BBP_RFC_READ_TABLE` contention and `device or resource busy` failures on busy SAP systems.
+- Transient `device or resource busy` RFC errors are retried automatically before the circuit breaker counts the call as failed.
 - `sap_wrapper_catalog` gives the ABAP and dashboard teams one live view of expected wrapper families and covered KPI IDs.
 - `sap_wrapper_probe` is the fastest way to validate a newly transported `ZHC_*` wrapper before debugging dashboard behavior.
 - direct SAP connection settings are validated at startup; invalid `SAP_SYSNR`, invalid `SAP_CLIENT`, partial direct credentials, or swapped `SAP_ASHOST` and `SAP_SYSNR` fail fast with explicit errors
@@ -148,15 +149,9 @@ There is no remaining direct-KPI backlog in the Node registry. The remaining uni
 
 ## Wrapper-Backed KPI Families
 
-The executor is now prepared to consume these SAP custom wrappers when they exist:
+The current registry still expects these SAP custom wrappers when they exist:
 
-- `ZHC_GET_SECURITY_KPIS`
-- `ZHC_GET_OTC_KPIS`
-- `ZHC_GET_P2P_KPIS`
-- `ZHC_GET_FINANCE_KPIS`
 - `ZHC_GET_DATA_QUALITY_KPIS`
-- `ZHC_GET_JOB_KPIS`
-- `ZHC_GET_MANUFACTURING_KPIS`
 - `ZHC_GET_SERVICE_KPIS`
 - `ZHC_GET_TAX_KPIS`
 - `ZHC_GET_EAM_KPIS`
