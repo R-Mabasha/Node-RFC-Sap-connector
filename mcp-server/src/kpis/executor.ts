@@ -42,6 +42,10 @@ import {
   isBusyResourceError,
   isSapCapabilityError,
 } from "../utils/errors.js";
+import { LruCache } from "../utils/lruCache.js";
+import { withRetries } from "../utils/retry.js";
+import { Semaphore } from "../utils/semaphore.js";
+import type { Logger } from "../utils/logger.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -53,11 +57,9 @@ const DEFAULT_SCAN_CAP = 10000;
 
 /**
  * Batch execution concurrency.
- * The SAP-side table readers are contention-sensitive on this landscape, so
- * we default to sequential KPI execution and rely on TTL caching to keep
- * repeated dashboard polls inexpensive.
+ * Capped by a semaphore to avoid overwhelming the SAP connection pool.
  */
-const DEFAULT_RUN_MANY_CONCURRENCY = 1;
+const DEFAULT_RUN_MANY_CONCURRENCY = 3;
 
 /** Retry delays for read-only KPI RFC calls when SAP reports transient contention. */
 const READ_ONLY_RFC_RETRY_DELAYS_MS = [250, 750];
@@ -70,39 +72,33 @@ const TIER_TTL_MS: Record<string, number> = {
   daily: 86_400_000,      // 24h
 };
 
-// ── TTL result cache ───────────────────────────────────────────────────────
+/** Bounded LRU cache to prevent unbounded memory growth in multi-tenant deployments. */
+const MAX_CACHE_ENTRIES = 1000;
+const DEFAULT_CACHE_TTL_MS = 60_000;
 
-interface CachedResult {
-  result: KpiResult;
-  expiresAt: number;
+const resultCache = new LruCache<string, KpiResult>({
+  maxSize: MAX_CACHE_ENTRIES,
+  defaultTtlMs: DEFAULT_CACHE_TTL_MS,
+});
+
+function getCacheKey(kpiId: string, input: KpiRequestInput, systemFingerprint: string): string {
+  const flavor = getRequestedSapFlavor(input);
+  const dims = input.dimensions
+    ? Object.entries(input.dimensions)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([k, v]) => `${k}=${v}`)
+        .join("&")
+    : "";
+  return `${kpiId}|${systemFingerprint}|${input.from ?? ""}|${input.to ?? ""}|${flavor}|${dims}`;
 }
 
-const resultCache = new Map<string, CachedResult>();
-
-function getCacheKey(kpiId: string, input: KpiRequestInput): string {
-  return JSON.stringify({
-    kpiId,
-    from: input.from ?? "",
-    to: input.to ?? "",
-    sapFlavor: getRequestedSapFlavor(input),
-    dimensions: input.dimensions ?? {},
-  });
+function getCachedResult(kpiId: string, input: KpiRequestInput, systemFingerprint: string): KpiResult | undefined {
+  return resultCache.get(getCacheKey(kpiId, input, systemFingerprint));
 }
 
-function getCachedResult(kpiId: string, input: KpiRequestInput): KpiResult | undefined {
-  const key = getCacheKey(kpiId, input);
-  const cached = resultCache.get(key);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.result;
-  }
-  if (cached) resultCache.delete(key);
-  return undefined;
-}
-
-function setCachedResult(kpiId: string, input: KpiRequestInput, result: KpiResult, tier?: string): void {
-  const ttl = TIER_TTL_MS[tier ?? "realtime"] ?? 60_000;
-  const key = getCacheKey(kpiId, input);
-  resultCache.set(key, { result, expiresAt: Date.now() + ttl });
+function setCachedResult(kpiId: string, input: KpiRequestInput, result: KpiResult, systemFingerprint: string, tier?: string): void {
+  const ttl = TIER_TTL_MS[tier ?? "realtime"] ?? DEFAULT_CACHE_TTL_MS;
+  resultCache.set(getCacheKey(kpiId, input, systemFingerprint), result, ttl);
 }
 
 // ── Type guards ────────────────────────────────────────────────────────────
@@ -131,12 +127,6 @@ function computeWindowDays(input: KpiRequestInput): number {
   }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
 export class KpiExecutor {
   /**
    * Window-based scan cap multiplier.
@@ -148,6 +138,7 @@ export class KpiExecutor {
   private readonly definitionsById = new Map(
     KPI_DEFINITIONS.map((definition) => [definition.id, definition]),
   );
+  private readonly semaphore = new Semaphore(DEFAULT_RUN_MANY_CONCURRENCY);
 
   /**
    * Helpers injected into every executable KPI's execute() method.
@@ -175,7 +166,11 @@ export class KpiExecutor {
     getSapFlavor: (input) => getRequestedSapFlavor(input),
   };
 
-  constructor(private readonly sapClient: SapClient) {}
+  constructor(
+    private readonly sapClient: SapClient,
+    private readonly systemFingerprint: string = "default",
+    private readonly logger?: Logger,
+  ) {}
 
   // ── Public API ─────────────────────────────────────────────────────────
 
@@ -200,16 +195,12 @@ export class KpiExecutor {
     this.scanCapMultiplier = computeWindowDays(input);
 
     const wrapperCache = new Map<string, Promise<Map<string, KpiResult>>>();
-    const results: KpiResult[] = [];
 
-    for (let index = 0; index < kpiIds.length; index += DEFAULT_RUN_MANY_CONCURRENCY) {
-      const batch = kpiIds.slice(index, index + DEFAULT_RUN_MANY_CONCURRENCY);
-      const batchResults = await Promise.all(
-        batch.map((kpiId) => this.runWithCache(kpiId, input, wrapperCache)),
-      );
+    const promises = kpiIds.map((kpiId) =>
+      this.semaphore.withPermit(() => this.runWithCache(kpiId, input, wrapperCache)),
+    );
 
-      results.push(...batchResults);
-    }
+    const results = await Promise.all(promises);
 
     this.scanCapMultiplier = 1; // Reset after batch
     return results;
@@ -229,30 +220,14 @@ export class KpiExecutor {
     functionName: string,
     parameters?: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    let lastError: unknown;
-
-    for (
-      let attempt = 0;
-      attempt <= READ_ONLY_RFC_RETRY_DELAYS_MS.length;
-      attempt += 1
-    ) {
-      try {
-        return await this.sapClient.call(functionName, parameters);
-      } catch (error) {
-        lastError = error;
-
-        if (
-          !isBusyResourceError(error) ||
-          attempt === READ_ONLY_RFC_RETRY_DELAYS_MS.length
-        ) {
-          throw error;
-        }
-
-        await sleep(READ_ONLY_RFC_RETRY_DELAYS_MS[attempt] ?? 0);
-      }
-    }
-
-    throw lastError;
+    return withRetries(
+      () => this.sapClient.call(functionName, parameters),
+      {
+        delaysMs: READ_ONLY_RFC_RETRY_DELAYS_MS,
+        retryIf: isBusyResourceError,
+        label: "callReadOnlyFunction",
+      },
+    );
   }
 
   private async runWithCache(
@@ -260,8 +235,7 @@ export class KpiExecutor {
     input: KpiRequestInput,
     wrapperCache: Map<string, Promise<Map<string, KpiResult>>>,
   ): Promise<KpiResult> {
-    // Check TTL cache first
-    const cached = getCachedResult(kpiId, input);
+    const cached = getCachedResult(kpiId, input, this.systemFingerprint);
     if (cached) return cached;
 
     const result = await this.runWithWrapperCache(kpiId, input, wrapperCache);
@@ -269,7 +243,7 @@ export class KpiExecutor {
     // Cache only healthy results so transient SAP failures can recover on retry.
     if (result.status === "ok") {
       const definition = this.definitionsById.get(kpiId);
-      setCachedResult(kpiId, input, result, definition?.tier);
+      setCachedResult(kpiId, input, result, this.systemFingerprint, definition?.tier);
     }
 
     return result;
@@ -462,9 +436,7 @@ export class KpiExecutor {
     while (true) {
       if (rowSkips >= scanCap) {
         // Cap reached — return partial count instead of crashing
-        console.warn(
-          `[KPI] Scan cap (${scanCap}) reached for ${request.table}. Returning partial count: ${total}.`,
-        );
+        this.logger?.warn(`[KPI] Scan cap (${scanCap}) reached for ${request.table}. Returning partial count: ${total}.`);
         return total;
       }
 
@@ -501,9 +473,7 @@ export class KpiExecutor {
 
     while (true) {
       if (rows.length >= scanCap) {
-        console.warn(
-          `[KPI] Scan cap (${scanCap}) reached for ${request.table}. Returning ${rows.length} partial rows.`,
-        );
+        this.logger?.warn(`[KPI] Scan cap (${scanCap}) reached for ${request.table}. Returning ${rows.length} partial rows.`);
         return rows;
       }
 

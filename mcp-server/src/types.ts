@@ -9,6 +9,8 @@ export interface AppConfig {
   host: string;
   port: number;
   sap: SapConfig;
+  /** Shared secret for JWT-based SAP credential authentication. If unset, JWT auth is disabled. */
+  jwtSecret?: string;
 }
 
 export interface SapConfig {
@@ -32,6 +34,8 @@ export interface SapConfig {
   allowedTables: string[];
   /** Allowlisted RFC function modules - EMPTY ARRAY = unrestricted access */
   allowedFunctions: string[];
+  /** Whether unrestricted mode is enabled (no allowlist enforcement) */
+  unrestrictedMode: boolean;
   /** Circuit breaker: consecutive failures before opening the breaker. */
   circuitBreakerThreshold: number;
   /** Circuit breaker: milliseconds to wait before retrying after breaker opens. */

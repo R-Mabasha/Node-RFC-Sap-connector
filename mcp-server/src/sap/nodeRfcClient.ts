@@ -22,6 +22,7 @@ import {
   isBusyResourceError,
   shouldTripCircuitBreaker,
 } from "../utils/errors.js";
+import { withRetries } from "../utils/retry.js";
 
 // ── node-rfc type stubs (avoids hard compile-time dependency) ──────────────
 
@@ -182,12 +183,6 @@ function joinErrorMessages(errors: Array<{ functionName: string; error: unknown 
     .join(" | ");
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
 function shouldCompactWhereClauses(
   functionName: string,
   where: string[] | undefined,
@@ -240,7 +235,6 @@ export class NodeRfcSapClient implements SapClient {
   private poolPromise?: Promise<NodeRfcPool>;
   private activeTableReadFunction?: string;
   private tableReadResolutionPromise?: Promise<void>;
-  private tableReadTail: Promise<void> = Promise.resolve();
 
   /** Circuit breaker prevents hammering a down SAP system. */
   private readonly breaker: CircuitBreaker;
@@ -403,26 +397,11 @@ export class NodeRfcSapClient implements SapClient {
   }
 
   private async withTransientRetries<T>(fn: () => Promise<T>): Promise<T> {
-    let lastError: unknown;
-
-    for (let attempt = 0; attempt <= BUSY_RETRY_DELAYS_MS.length; attempt += 1) {
-      try {
-        return await fn();
-      } catch (error) {
-        lastError = error;
-
-        if (
-          !isBusyResourceError(error) ||
-          attempt === BUSY_RETRY_DELAYS_MS.length
-        ) {
-          throw error;
-        }
-
-        await sleep(BUSY_RETRY_DELAYS_MS[attempt] ?? 0);
-      }
-    }
-
-    throw lastError;
+    return withRetries(fn, {
+      delaysMs: BUSY_RETRY_DELAYS_MS,
+      retryIf: isBusyResourceError,
+      label: "nodeRfcClient",
+    });
   }
 
   // ── Pool management ────────────────────────────────────────────────────
@@ -431,7 +410,10 @@ export class NodeRfcSapClient implements SapClient {
     this.requireConnectionParameters();
 
     if (!this.poolPromise) {
-      this.poolPromise = this.createPool();
+      this.poolPromise = this.createPool().catch((err) => {
+        this.poolPromise = undefined;
+        throw err;
+      });
     }
 
     return this.poolPromise;
@@ -575,19 +557,17 @@ export class NodeRfcSapClient implements SapClient {
       request.where,
     );
 
-    return this.withSerializedTableRead(() =>
-      this.withCircuitBreaker(() =>
-        this.withTransientRetries(() =>
-          this.withClient((client) =>
-            client.call(functionName, {
-              QUERY_TABLE: request.table,
-              DELIMITER: request.delimiter,
-              ROWCOUNT: request.rowCount,
-              ROWSKIPS: request.rowSkips,
-              FIELDS: request.fields.map((field) => ({ FIELDNAME: field })),
-              OPTIONS: normalizedWhere.map((line) => ({ TEXT: line })),
-            }),
-          ),
+    return this.withCircuitBreaker(() =>
+      this.withTransientRetries(() =>
+        this.withClient((client) =>
+          client.call(functionName, {
+            QUERY_TABLE: request.table,
+            DELIMITER: request.delimiter,
+            ROWCOUNT: request.rowCount,
+            ROWSKIPS: request.rowSkips,
+            FIELDS: request.fields.map((field) => ({ FIELDNAME: field })),
+            OPTIONS: normalizedWhere.map((line) => ({ TEXT: line })),
+          }),
         ),
       ),
     );
@@ -622,20 +602,4 @@ export class NodeRfcSapClient implements SapClient {
     }
   }
 
-  private async withSerializedTableRead<T>(fn: () => Promise<T>): Promise<T> {
-    const previous = this.tableReadTail.catch(() => undefined);
-    let release: (() => void) | undefined;
-
-    this.tableReadTail = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-
-    await previous;
-
-    try {
-      return await fn();
-    } finally {
-      release?.();
-    }
-  }
 }

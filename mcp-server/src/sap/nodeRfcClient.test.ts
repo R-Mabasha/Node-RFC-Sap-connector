@@ -49,6 +49,7 @@ test("capability mismatches do not trip the circuit breaker", async () => {
     tableReadFunctions: ["BBP_RFC_READ_TABLE"],
     allowedTables: [],
     allowedFunctions: [],
+    unrestrictedMode: true,
     circuitBreakerThreshold: 2,
     circuitBreakerResetMs: 60000,
   };

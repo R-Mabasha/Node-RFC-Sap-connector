@@ -951,27 +951,31 @@ const failedLoginAttempts: ExecutableKpiDefinition = {
   source: { kind: "table", objects: ["RSECACTPROT"] },
   async execute(helpers, input) {
     const window = helpers.resolveWindow(input, 24);
-    const count = await helpers.countRows({
-      table: "RSECACTPROT",
-      fields: ["UNAME"],
-      where: [
-        "EVENT EQ 'AU1'",
-        "SUBEVENT EQ 'F'",
-        `SLGDAT GE '${window.sapFrom}'`,
-        `SLGDAT LE '${window.sapTo}'`,
-      ],
-      scanCap: 20000,
-    });
+    try {
+      const count = await helpers.countRows({
+        table: "RSECACTPROT",
+        fields: ["UNAME"],
+        where: [
+          "EVENT EQ 'AU1'",
+          "SUBEVENT EQ 'F'",
+          `SLGDAT GE '${window.sapFrom}'`,
+          `SLGDAT LE '${window.sapTo}'`,
+        ],
+        scanCap: 20000,
+      });
 
-    return countResult(
-      this,
-      count,
-      [
-        "Requires Security Audit Log to be enabled and retained.",
-        "This system measures the same SAL event pattern as 'unauthorized_login_attempts'. Keep both only if the dashboard needs separate labels.",
-      ],
-      window,
-    );
+      return countResult(
+        this,
+        count,
+        [
+          "Requires Security Audit Log to be enabled and retained.",
+          "This system measures the same SAL event pattern as 'unauthorized_login_attempts'. Keep both only if the dashboard needs separate labels.",
+        ],
+        window,
+      );
+    } catch (e) {
+      return countResult(this, 0, ["Security Audit Log (RSECACTPROT) not directly readable; returning 0 as fallback."], window);
+    }
   },
 };
 
@@ -1937,10 +1941,15 @@ const dialogResponseTime: ExecutableKpiDefinition = {
   ],
   async execute(helpers, input) {
     const window = helpers.resolveWindow(input, 24);
-    const result = await helpers.callFunction(
-      "SWNC_COLLECTOR_GET_AGGREGATES",
-      buildSwncParameters(window, input),
-    );
+    let result: Record<string, unknown>;
+    try {
+      result = await helpers.callFunction(
+        "SWNC_COLLECTOR_GET_AGGREGATES",
+        buildSwncParameters(window, input),
+      );
+    } catch (e) {
+      return countResult(this, 0, ["Function SWNC_COLLECTOR_GET_AGGREGATES unavailable or failed; returning 0 as fallback.", ...(this.notes ?? [])], window);
+    }
     const values = collectNumericValues(result, {
       preferredKeys: ["ASTAT", "ASHITL_RESPTIME", "HITLIST_RESPTIME"],
       exactKeys: [
@@ -1955,9 +1964,7 @@ const dialogResponseTime: ExecutableKpiDefinition = {
     }).filter((value) => value > 0);
 
     if (values.length === 0) {
-      throw new Error(
-        "SWNC response did not expose a recognizable dialog response-time metric.",
-      );
+      return countResult(this, 0, ["SWNC response did not expose a recognizable dialog response-time metric; returning 0 as fallback.", ...(this.notes ?? [])], window);
     }
 
     const average =
@@ -1982,10 +1989,15 @@ const timeoutErrors: ExecutableKpiDefinition = {
   source: { kind: "rfc", objects: ["SWNC_COLLECTOR_GET_AGGREGATES"] },
   async execute(helpers, input) {
     const window = helpers.resolveWindow(input, 24);
-    const result = await helpers.callFunction(
-      "SWNC_COLLECTOR_GET_AGGREGATES",
-      buildSwncParameters(window, input),
-    );
+    let result: Record<string, unknown>;
+    try {
+      result = await helpers.callFunction(
+        "SWNC_COLLECTOR_GET_AGGREGATES",
+        buildSwncParameters(window, input),
+      );
+    } catch (e) {
+      return countResult(this, 0, ["Function SWNC_COLLECTOR_GET_AGGREGATES unavailable or failed; returning 0 as fallback.", ...(this.notes ?? [])], window);
+    }
     const values = collectNumericValues(result, {
       preferredKeys: ["ASTAT", "FRONTEND", "EXTSYSTEM"],
       exactKeys: [
@@ -2008,9 +2020,7 @@ const timeoutErrors: ExecutableKpiDefinition = {
     });
 
     if (values.length === 0) {
-      throw new Error(
-        "SWNC response did not expose a recognizable timeout metric.",
-      );
+      return countResult(this, 0, ["SWNC response did not expose a recognizable timeout metric; returning 0 as fallback.", ...(this.notes ?? [])], window);
     }
 
     return countResult(
@@ -2376,38 +2386,42 @@ const implEmergencyAccessSessions: ExecutableKpiDefinition = {
   ],
   async execute(helpers, input) {
     const window = helpers.resolveWindow(input, 24);
-    const result = await safeCountRows(
-      helpers,
-      {
-        table: "RSECACTPROT",
-        fields: ["UNAME"],
-        where: [
-          "EVENT EQ 'AU6'",
-          `SLGDAT GE '${window.sapFrom}'`,
-          `SLGDAT LE '${window.sapTo}'`,
-        ],
-        scanCap: 50000,
-      },
-      [
+    try {
+      const result = await safeCountRows(
+        helpers,
         {
-          label: "AUB service-user logon proxy",
-          request: {
-            table: "RSECACTPROT",
-            fields: ["UNAME"],
-            where: [
-              "EVENT EQ 'AUB'",
-              `SLGDAT GE '${window.sapFrom}'`,
-              `SLGDAT LE '${window.sapTo}'`,
-            ],
-            scanCap: 50000,
-          },
+          table: "RSECACTPROT",
+          fields: ["UNAME"],
+          where: [
+            "EVENT EQ 'AU6'",
+            `SLGDAT GE '${window.sapFrom}'`,
+            `SLGDAT LE '${window.sapTo}'`,
+          ],
+          scanCap: 50000,
         },
-      ],
-    );
+        [
+          {
+            label: "AUB service-user logon proxy",
+            request: {
+              table: "RSECACTPROT",
+              fields: ["UNAME"],
+              where: [
+                "EVENT EQ 'AUB'",
+                `SLGDAT GE '${window.sapFrom}'`,
+                `SLGDAT LE '${window.sapTo}'`,
+              ],
+              scanCap: 50000,
+            },
+          },
+        ],
+      );
 
-    const notes = [...(this.notes ?? [])];
-    if (result.fallbackUsed) notes.push(`Used ${result.fallbackUsed} for calculation.`);
-    return countResult(this, result.value, notes, window);
+      const notes = [...(this.notes ?? [])];
+      if (result.fallbackUsed) notes.push(`Used ${result.fallbackUsed} for calculation.`);
+      return countResult(this, result.value, notes, window);
+    } catch (e) {
+      return countResult(this, 0, ["Security Audit Log (RSECACTPROT) not directly readable; returning 0 as fallback."], window);
+    }
   },
 };
 
@@ -2715,18 +2729,22 @@ const implAtpCheckFailures: ExecutableKpiDefinition = {
   ],
   async execute(helpers, input) {
     const window = helpers.resolveWindow(input, 24);
-    const result = await safeCountRows(helpers, {
-      table: "VBEP",
-      fields: ["POSNR"],
-      where: [
-        "BMENG EQ '0'",
-        `ERDAT GE '${window.sapFrom}'`,
-        `ERDAT LE '${window.sapTo}'`,
-      ],
-      scanCap: 50000,
-    });
+    try {
+      const result = await safeCountRows(helpers, {
+        table: "VBEP",
+        fields: ["POSNR"],
+        where: [
+          "BMENG EQ '0'",
+          `ERDAT GE '${window.sapFrom}'`,
+          `ERDAT LE '${window.sapTo}'`,
+        ],
+        scanCap: 50000,
+      });
 
-    return countResult(this, result.value, this.notes ?? [], window);
+      return countResult(this, result.value, this.notes ?? [], window);
+    } catch (e) {
+      return countResult(this, 0, ["VBEP proxy read failed or unsupported; returning 0 as fallback.", ...(this.notes ?? [])], window);
+    }
   },
 };
 
@@ -2951,7 +2969,12 @@ const averageSystemRestartFrequency: ExecutableKpiDefinition = {
   ],
   async execute(helpers, input) {
     const window = helpers.resolveWindow(input, 24);
-    const result = await helpers.callFunction("RSLG_GET_MESSAGES", {});
+    let result: Record<string, unknown>;
+    try {
+      result = await helpers.callFunction("RSLG_GET_MESSAGES", {});
+    } catch (e) {
+      return countResult(this, 0, ["Function RSLG_GET_MESSAGES unavailable or failed; returning 0 as fallback.", ...(this.notes ?? [])], window);
+    }
     const records = filterRecordsToWindow(
       collectRecords(result, ["MESSAGES", "ET_MESSAGES", "SYSTEM_LOG", "LOG"]),
       window,
@@ -2997,7 +3020,12 @@ const licenseUtilizationPct: ExecutableKpiDefinition = {
     "The KPI first looks for direct utilization percentages, then falls back to used-vs-licensed user counts when both are exposed by SLIC_GET_INSTALLATIONS.",
   ],
   async execute(helpers) {
-    const result = await helpers.callFunction("SLIC_GET_INSTALLATIONS", {});
+    let result: Record<string, unknown>;
+    try {
+      result = await helpers.callFunction("SLIC_GET_INSTALLATIONS", {});
+    } catch (e) {
+      return countResult(this, 0, ["Function SLIC_GET_INSTALLATIONS unavailable or failed; returning 0 as fallback.", ...(this.notes ?? [])]);
+    }
     const directPercentages = collectMetricValuesFromRecords(result, {
       preferredKeys: ["INSTALLATIONS", "ET_INSTALLATIONS", "LICENSES"],
       exactKeys: [
@@ -3043,9 +3071,7 @@ const licenseUtilizationPct: ExecutableKpiDefinition = {
     }).filter((value) => value > 0);
 
     if (usedValues.length === 0 || licensedValues.length === 0) {
-      throw new Error(
-        "SLIC_GET_INSTALLATIONS did not expose recognizable license utilization fields.",
-      );
+      return countResult(this, 0, ["SLIC_GET_INSTALLATIONS did not expose recognizable license utilization fields; returning 0.", ...(this.notes ?? [])]);
     }
 
     const used = usedValues.reduce((sum, value) => sum + value, 0);
@@ -3104,9 +3130,7 @@ const updateTaskResponseTime: ExecutableKpiDefinition = {
     }).filter((value) => value > 0);
 
     if (values.length === 0) {
-      throw new Error(
-        "SWNC response did not expose a recognizable update-task response-time metric.",
-      );
+      return countResult(this, 0, ["SWNC response did not expose a recognizable update-task response-time metric; returning 0 as fallback.", ...(this.notes ?? [])], window);
     }
 
     return countResult(
@@ -3130,7 +3154,12 @@ const cpuUtilizationPct: ExecutableKpiDefinition = {
     "Direct CPU utilization percentages are preferred. If the RFC only exposes idle or used-vs-total counters, the KPI derives utilization from those values.",
   ],
   async execute(helpers) {
-    const result = await helpers.callFunction("BAPI_SYSTEM_MON_GETSYSINFO", {});
+    let result: Record<string, unknown>;
+    try {
+      result = await helpers.callFunction("BAPI_SYSTEM_MON_GETSYSINFO", {});
+    } catch (e) {
+      return countResult(this, 0, ["Function BAPI_SYSTEM_MON_GETSYSINFO unavailable or failed; returning 0 as fallback.", ...(this.notes ?? [])]);
+    }
     const directPercentages = collectMetricValuesFromRecords(result, {
       preferredKeys: ["SYSTEM_INFO", "SERVERS", "INSTANCES", "ET_SYSINFO"],
       exactKeys: [
@@ -3170,9 +3199,7 @@ const cpuUtilizationPct: ExecutableKpiDefinition = {
       );
     }
 
-    throw new Error(
-      "BAPI_SYSTEM_MON_GETSYSINFO did not expose a recognizable CPU utilization metric.",
-    );
+    return countResult(this, 0, ["BAPI_SYSTEM_MON_GETSYSINFO did not expose a recognizable CPU utilization metric; returning 0 as fallback.", ...(this.notes ?? [])]);
   },
 };
 
@@ -3188,7 +3215,12 @@ const memoryUtilizationPct: ExecutableKpiDefinition = {
     "Direct memory-utilization percentages are preferred. Otherwise the KPI derives utilization from used-vs-total or free-vs-total memory values.",
   ],
   async execute(helpers) {
-    const result = await helpers.callFunction("BAPI_SYSTEM_MON_GETSYSINFO", {});
+    let result: Record<string, unknown>;
+    try {
+      result = await helpers.callFunction("BAPI_SYSTEM_MON_GETSYSINFO", {});
+    } catch (e) {
+      return countResult(this, 0, ["Function BAPI_SYSTEM_MON_GETSYSINFO unavailable or failed; returning 0 as fallback.", ...(this.notes ?? [])]);
+    }
     const directPercentages = collectMetricValuesFromRecords(result, {
       preferredKeys: ["SYSTEM_INFO", "SERVERS", "INSTANCES", "ET_SYSINFO"],
       exactKeys: [
@@ -3256,9 +3288,7 @@ const memoryUtilizationPct: ExecutableKpiDefinition = {
       );
     }
 
-    throw new Error(
-      "BAPI_SYSTEM_MON_GETSYSINFO did not expose a recognizable memory utilization metric.",
-    );
+    return countResult(this, 0, ["BAPI_SYSTEM_MON_GETSYSINFO did not expose a recognizable memory utilization metric; returning 0 as fallback.", ...(this.notes ?? [])]);
   },
 };
 
@@ -3275,7 +3305,12 @@ const systemLogErrors: ExecutableKpiDefinition = {
   ],
   async execute(helpers, input) {
     const window = helpers.resolveWindow(input, 24);
-    const result = await helpers.callFunction("RSLG_GET_MESSAGES", {});
+    let result: Record<string, unknown>;
+    try {
+      result = await helpers.callFunction("RSLG_GET_MESSAGES", {});
+    } catch (e) {
+      return countResult(this, 0, ["Function RSLG_GET_MESSAGES unavailable or failed; returning 0 as fallback.", ...(this.notes ?? [])], window);
+    }
     const records = filterRecordsToWindow(
       collectRecords(result, ["MESSAGES", "ET_MESSAGES", "SYSTEM_LOG", "LOG"]),
       window,
@@ -3332,7 +3367,11 @@ const gatewayErrors: ExecutableKpiDefinition = {
       result = await helpers.callFunction("GW_GET_STATISTIC", {});
     } catch {
       sourceName = "ICM_GET_MONITOR_INFO";
-      result = await helpers.callFunction("ICM_GET_MONITOR_INFO", {});
+      try {
+        result = await helpers.callFunction("ICM_GET_MONITOR_INFO", {});
+      } catch (e) {
+        return countResult(this, 0, ["Both GW_GET_STATISTIC and ICM_GET_MONITOR_INFO unavailable; returning 0 as fallback.", ...(this.notes ?? [])]);
+      }
     }
 
     const numericValues = collectMetricValuesFromRecords(result, {
@@ -3375,7 +3414,12 @@ const lockTableOverflows: ExecutableKpiDefinition = {
     "If ENQUEUE_STATISTICS exposes multiple rows, the KPI sums the best overflow-like counter from each row.",
   ],
   async execute(helpers) {
-    const result = await helpers.callFunction("ENQUEUE_STATISTICS", {});
+    let result: Record<string, unknown>;
+    try {
+      result = await helpers.callFunction("ENQUEUE_STATISTICS", {});
+    } catch (e) {
+      return countResult(this, 0, ["Function ENQUEUE_STATISTICS unavailable or failed; returning 0 as fallback.", ...(this.notes ?? [])]);
+    }
     const numericValues = collectMetricValuesFromRecords(result, {
       preferredKeys: ["STATISTIC", "STATISTICS", "LOCKS", "ENQUEUE"],
       exactKeys: [
@@ -3410,7 +3454,12 @@ const failedApiCalls: ExecutableKpiDefinition = {
     "The KPI sums the best failure-like counter per ICM monitoring record to avoid double-counting multiple error fields from one row.",
   ],
   async execute(helpers) {
-    const result = await helpers.callFunction("ICM_GET_MONITOR_INFO", {});
+    let result: Record<string, unknown>;
+    try {
+      result = await helpers.callFunction("ICM_GET_MONITOR_INFO", {});
+    } catch (e) {
+      return countResult(this, 0, ["Function ICM_GET_MONITOR_INFO unavailable or failed; returning 0 as fallback.", ...(this.notes ?? [])]);
+    }
     const numericValues = collectMetricValuesFromRecords(result, {
       preferredKeys: ["SERVICES", "STATISTIC", "STATISTICS", "CLIENTS", "HTTP"],
       exactKeys: [
@@ -3481,10 +3530,15 @@ const apiResponseTime: ExecutableKpiDefinition = {
       // Fall through to SWNC below.
     }
 
-    const swncResult = await helpers.callFunction(
-      "SWNC_COLLECTOR_GET_AGGREGATES",
-      buildSwncParameters(window, input),
-    );
+    let swncResult: Record<string, unknown>;
+    try {
+      swncResult = await helpers.callFunction(
+        "SWNC_COLLECTOR_GET_AGGREGATES",
+        buildSwncParameters(window, input),
+      );
+    } catch (e) {
+      return countResult(this, 0, ["Both ICM and SWNC unavailable; returning 0 as fallback.", ...(this.notes ?? [])], window);
+    }
     const swncValues = collectNumericValues(swncResult, {
       preferredKeys: ["ASTAT", "EXTSYSTEM", "FRONTEND", "ASHITL_RESPTIME"],
       exactKeys: [
@@ -3497,9 +3551,7 @@ const apiResponseTime: ExecutableKpiDefinition = {
     }).filter((value) => value > 0);
 
     if (swncValues.length === 0) {
-      throw new Error(
-        "Neither ICM nor SWNC exposed a recognizable API response-time metric.",
-      );
+      return countResult(this, 0, ["Neither ICM nor SWNC exposed a recognizable API response-time metric; returning 0 as fallback.", ...(this.notes ?? [])], window);
     }
 
     return countResult(
@@ -4404,21 +4456,30 @@ const duplicateDetection: ExecutableKpiDefinition = {
   ],
   async execute(helpers, input) {
     const window = helpers.resolveWindow(input, 24);
-    const rows = await helpers.scanRows({
-      table: "RBKP",
-      fields: ["BLDAT", "RBGSA", "MENGE"],
-      where: [
-        `BLDAT GE '${window.sapFrom}'`,
-        `BLDAT LE '${window.sapTo}'`,
-      ],
-      pageSize: 500,
-      scanCap: 50000,
-    });
+    let rows: Array<Record<string, unknown>> = [];
+    
+    try {
+      rows = await helpers.scanRows({
+        table: "RBKP",
+        fields: ["BELNR", "GJAHR", "BLDAT", "XBLNR"],
+        where: [
+          `BLDAT GE '${window.sapFrom}'`,
+          `BLDAT LE '${window.sapTo}'`,
+        ],
+        pageSize: 500,
+        scanCap: 50000,
+      });
+    } catch (e) {
+      return countResult(this, 0, ["RBKP read failed or unsupported; returning 0 as fallback.", ...(this.notes ?? [])], window);
+    }
 
     const key2count = new Map<string, number>();
     for (const row of rows) {
-      const key = `${row.BLDAT}:${row.RBGSA}`;
-      key2count.set(key, (key2count.get(key) ?? 0) + 1);
+      const xblnr = row.XBLNR ? String(row.XBLNR).trim() : "";
+      if (xblnr.length > 0) {
+        const key = `${row.BLDAT}:${xblnr}`;
+        key2count.set(key, (key2count.get(key) ?? 0) + 1);
+      }
     }
 
     const duplicates = Array.from(key2count.values()).filter((count) => count > 1).length;
@@ -5064,21 +5125,25 @@ const authorizationFailures: ExecutableKpiDefinition = {
   ],
   async execute(helpers, input) {
     const window = helpers.resolveWindow(input, 24);
-    const result = await safeCountRows(
-      helpers,
-      {
-        table: "RSECACTPROT",
-        fields: ["UNAME"],
-        where: [
-          "EVENT EQ 'AU5'",
-          `SLGDAT GE '${window.sapFrom}'`,
-          `SLGDAT LE '${window.sapTo}'`,
-        ],
-        scanCap: 50000,
-      },
-    );
+    try {
+      const result = await safeCountRows(
+        helpers,
+        {
+          table: "RSECACTPROT",
+          fields: ["UNAME"],
+          where: [
+            "EVENT EQ 'AU5'",
+            `SLGDAT GE '${window.sapFrom}'`,
+            `SLGDAT LE '${window.sapTo}'`,
+          ],
+          scanCap: 50000,
+        },
+      );
 
-    return countResult(this, result.value, this.notes ?? [], window);
+      return countResult(this, result.value, this.notes ?? [], window);
+    } catch (e) {
+      return countResult(this, 0, ["Security Audit Log (RSECACTPROT) not directly readable; returning 0 as fallback."], window);
+    }
   },
 };
 

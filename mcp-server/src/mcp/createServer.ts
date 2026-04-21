@@ -5,6 +5,7 @@ import * as z from "zod/v4";
 import { KpiExecutor } from "../kpis/executor.js";
 import type { AppConfig, KpiResult, SapClient } from "../types.js";
 import { describeError } from "../utils/errors.js";
+import type { Logger } from "../utils/logger.js";
 import {
   buildWrapperCallParameters,
   buildWrapperCatalog,
@@ -16,6 +17,7 @@ interface ServerContext {
   config: AppConfig;
   sapClient: SapClient;
   kpiExecutor: KpiExecutor;
+  logger: Logger;
 }
 
 function asText(payload: unknown): string {
@@ -41,6 +43,7 @@ async function readProjectDoc(name: string): Promise<string> {
 }
 
 export function createSapMcpServer(context: ServerContext): McpServer {
+  const logger = context.logger;
   const server = new McpServer({
     name: "hypercare-sap-mcp-server",
     version: "0.1.0",
@@ -145,6 +148,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
       },
     },
     async ({ probeTable, probeFields, readerFunction }) => {
+      logger.info("[MCP TOOL] sap_connection_check");
+      logger.debug("[INPUT]", { probeTable, probeFields, readerFunction });
       let reachable = false;
       let error: string | undefined;
       let tableReadProbe:
@@ -207,6 +212,7 @@ export function createSapMcpServer(context: ServerContext): McpServer {
         error,
       };
 
+      logger.debug("[OUTPUT]", payload);
       return {
         content: [{ type: "text", text: asText(payload) }],
         structuredContent: payload,
@@ -229,6 +235,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
       },
     },
     async ({ functionNames, includeKpis }) => {
+      logger.info("[MCP TOOL] sap_wrapper_catalog");
+      logger.debug("[INPUT]", { functionNames, includeKpis });
       const requestedFunctions =
         functionNames?.map((value) => value.trim().toUpperCase()) ?? [];
       const catalog = getWrapperCatalog()
@@ -244,6 +252,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
           blockers: entry.blockers,
           kpis: includeKpis === false ? undefined : entry.kpis,
         }));
+
+      logger.info("[OUTPUT] Wrapper catalog", { wrapperCount: catalog.length });
 
       return {
         content: [{ type: "text", text: asText({ wrappers: catalog }) }],
@@ -270,6 +280,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
       },
     },
     async ({ functionName, from, to, dimensions, expectedKpiIds }) => {
+      logger.info("[MCP TOOL] sap_wrapper_probe");
+      logger.debug("[INPUT]", { functionName, from, to, dimensions, expectedKpiIds });
       const normalizedFunctionName = functionName.trim().toUpperCase();
       const catalogEntry = getWrapperCatalog().find(
         (entry) => entry.functionName === normalizedFunctionName,
@@ -298,6 +310,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
           documentedKpiIds: catalogEntry?.kpis.map((kpi) => kpi.wrapperKpiId) ?? [],
         };
 
+        logger.info("[OUTPUT] Wrapper probe successful", { functionName: normalizedFunctionName });
+
         return {
           content: [{ type: "text", text: asText(payload) }],
           structuredContent: payload,
@@ -311,6 +325,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
           expectedKpiIds: effectiveExpectedKpiIds,
           error: describeError(error),
         };
+
+        logger.error("[ERROR] Wrapper probe failed", payload);
 
         return {
           content: [{ type: "text", text: asText(payload) }],
@@ -344,6 +360,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
       },
     },
     async ({ maturity, sapFlavor }) => {
+      logger.info("[MCP TOOL] sap_kpi_catalog");
+      logger.debug("[INPUT]", { maturity, sapFlavor });
       const definitions = (sapFlavor
         ? context.kpiExecutor.listDefinitionsForFlavor(sapFlavor)
         : context.kpiExecutor.listDefinitions())
@@ -367,6 +385,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
           wrapper:
             "wrapper" in definition ? definition.wrapper : undefined,
         }));
+
+      logger.info("[OUTPUT] KPI catalog", { kpiCount: definitions.length });
 
       return {
         content: [{ type: "text", text: asText(definitions) }],
@@ -407,6 +427,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
       },
     },
     async ({ kpiIds, sapFlavor, from, to, dimensions, categories, tiers }) => {
+      logger.info("[MCP TOOL] sap_kpi_read");
+      logger.debug("[INPUT]", { kpiIds, sapFlavor, from, to, dimensions, categories, tiers });
       const firstId = kpiIds[0] ?? "";
       const isAllMode =
         kpiIds.length === 1 &&
@@ -451,6 +473,17 @@ export function createSapMcpServer(context: ServerContext): McpServer {
         dimensions,
       });
 
+      const okCount = results.filter((r) => r.status === "ok").length;
+      const errCount = results.filter((r) => r.status === "error").length;
+
+      logger.info("[OUTPUT] KPI Results", {
+        totalRequested: resolvedIds.length,
+        totalReturned: results.length,
+        success: okCount,
+        errors: errCount,
+      });
+      logger.debug("[KPI VALUES]", { summary: summarizeKpis(results) });
+
       return {
         content: [{ type: "text", text: summarizeKpis(results) }],
         structuredContent: {
@@ -485,6 +518,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
       },
     },
     async ({ table, fields, where, rowCount, rowSkips, readerFunction }) => {
+      logger.info("[MCP TOOL] sap_table_read");
+      logger.debug("[INPUT]", { table, fields, where, rowCount, rowSkips, readerFunction });
       try {
         const result = await context.sapClient.readTable({
           table,
@@ -493,6 +528,13 @@ export function createSapMcpServer(context: ServerContext): McpServer {
           rowCount,
           rowSkips,
           readerFunction,
+        });
+
+        logger.debug("[OUTPUT]", {
+          table: result.table,
+          rowCount: result.rowCount,
+          truncated: result.truncated,
+          readerFunction: result.readerFunction,
         });
 
         return {
@@ -515,6 +557,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
           readerFunction,
           error: describeError(error),
         };
+
+        logger.error("[ERROR] sap_table_read failed", payload);
 
         return {
           content: [{ type: "text", text: asText(payload) }],
@@ -539,8 +583,11 @@ export function createSapMcpServer(context: ServerContext): McpServer {
       },
     },
     async ({ functionName, parameters }) => {
+      logger.info("[MCP TOOL] sap_function_call");
+      logger.debug("[INPUT]", { functionName, parameters });
       try {
         const result = await context.sapClient.call(functionName, parameters ?? {});
+        logger.info("[OUTPUT] Function call successful", { functionName: functionName.trim().toUpperCase() });
 
         return {
           content: [{ type: "text", text: asText(result) }],
@@ -556,6 +603,8 @@ export function createSapMcpServer(context: ServerContext): McpServer {
           functionName: functionName.trim().toUpperCase(),
           error: describeError(error),
         };
+
+        logger.error("[ERROR] sap_function_call failed", payload);
 
         return {
           content: [{ type: "text", text: asText(payload) }],

@@ -32,6 +32,9 @@ const envSchema = z.object({
   MCP_HOST: z.string().trim().default("127.0.0.1"),
   MCP_PORT: z.coerce.number().int().min(1).max(65535).default(3001),
 
+  // -- JWT authentication (optional — enables multi-tenant SAP access) --
+  MCP_JWT_SECRET: z.string().trim().optional(),
+
   // -- SAP connection (destination-based) --
   SAP_DEST: z.string().trim().optional(),
 
@@ -58,6 +61,9 @@ const envSchema = z.object({
   // -- Legacy allowlist env vars kept only for backward-compatible warnings --
   SAP_ALLOWED_TABLES: z.string().optional(),
   SAP_ALLOWED_FUNCTIONS: z.string().optional(),
+
+  // -- Security --
+  MCP_UNRESTRICTED_MODE: z.enum(["true", "false"]).default("true"),
 });
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -84,7 +90,7 @@ function parseEnvValue(rawValue: string): string {
   const value = rawValue.trim();
 
   if (value.startsWith('"') && value.endsWith('"')) {
-    return value.slice(1, -1).replaceAll("\\n", "\n").replaceAll('\\"', '"');
+    return unescapeQuoted(value.slice(1, -1));
   }
 
   if (value.startsWith("'") && value.endsWith("'")) {
@@ -92,6 +98,33 @@ function parseEnvValue(rawValue: string): string {
   }
 
   return value;
+}
+
+function unescapeQuoted(input: string): string {
+  let out = "";
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (ch === "\\" && i + 1 < input.length) {
+      const next = input[i + 1];
+      if (next === "n") {
+        out += "\n";
+        i += 1;
+        continue;
+      }
+      if (next === '"') {
+        out += '"';
+        i += 1;
+        continue;
+      }
+      if (next === "\\") {
+        out += "\\";
+        i += 1;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return out;
 }
 
 function parseEnvFile(content: string): Record<string, string> {
@@ -333,10 +366,17 @@ export function loadConfig(
     ...envInput,
   });
   const validationWarnings = validateDirectConnectionParameters(env);
+  const isUnrestricted = env.MCP_UNRESTRICTED_MODE === "true";
   if (env.SAP_ALLOWED_TABLES || env.SAP_ALLOWED_FUNCTIONS) {
-    validationWarnings.push(
-      "SAP_ALLOWED_TABLES and SAP_ALLOWED_FUNCTIONS are ignored because this MCP server runs in unrestricted SAP access mode.",
-    );
+    if (!isUnrestricted) {
+      validationWarnings.push(
+        "SAP_ALLOWED_TABLES and SAP_ALLOWED_FUNCTIONS are now functional (MCP_UNRESTRICTED_MODE=false).",
+      );
+    } else {
+      validationWarnings.push(
+        "SAP_ALLOWED_TABLES and SAP_ALLOWED_FUNCTIONS are ignored because this MCP server runs in unrestricted SAP access mode.",
+      );
+    }
   }
   const resolvedConnection = resolveConnectionParameters(env);
   const configWarnings = [...loadedEnv.warnings, ...validationWarnings];
@@ -350,6 +390,7 @@ export function loadConfig(
   return {
     host: env.MCP_HOST,
     port: env.MCP_PORT,
+    jwtSecret: env.MCP_JWT_SECRET,
     sap: {
       connectionParameters: resolvedConnection.connectionParameters,
       connectionMode: resolvedConnection.connectionMode,
@@ -359,8 +400,9 @@ export function loadConfig(
       poolHigh: env.SAP_POOL_HIGH,
       timeoutMs: env.SAP_RFC_TIMEOUT_MS,
       tableReadFunctions: splitCsv(env.SAP_TABLE_READ_FUNCTIONS),
-      allowedTables: [], // Unrestricted access
-      allowedFunctions: [], // Unrestricted access
+      allowedTables: isUnrestricted ? [] : splitCsv(env.SAP_ALLOWED_TABLES ?? ""),
+      allowedFunctions: isUnrestricted ? [] : splitCsv(env.SAP_ALLOWED_FUNCTIONS ?? ""),
+      unrestrictedMode: isUnrestricted,
       circuitBreakerThreshold: env.SAP_CB_THRESHOLD,
       circuitBreakerResetMs: env.SAP_CB_RESET_MS,
     },
